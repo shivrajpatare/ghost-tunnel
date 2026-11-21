@@ -1,149 +1,97 @@
-# 👻 GhostTunnel
+# GhostTunnel
 
-Serverless, zero-persistence, peer-to-peer ephemeral photo and chat web app. Volatile RAM only: no central database, no persistent signaling server, and zero client-side disk caching.
+A serverless, browser-based app for sharing ephemeral photos and short messages directly between two devices. No accounts, no backend database, no signaling server, and nothing saved to disk.
 
----
+![GhostTunnel Architecture Workflow](docs/ghosttunnel-architecture.png)
 
-## 🔒 Security & Architecture Invariants
+## Why I Built This
 
-- **Zero Disk Persistence:** No calls to `localStorage`, `sessionStorage`, `indexedDB`, `document.cookie`, or Cache API.
-- **Mutual End-to-End Cryptography:**
-  - **Key Derivation:** Argon2id (`crypto_pwhash`) derives a 32-byte key from a shared passkey to seal out-of-band `GT1.` tokens with Deflate compression.
-  - **Key Exchange:** Ephemeral X25519 key exchange establishes forward-secret directional keys (`sharedTx` / `sharedRx`).
-  - **Frame Encryption:** Every WebRTC DataChannel packet is sealed with `XChaCha20-Poly1305` using a 4-byte big-endian monotonically increasing sequence counter as Associated Data (AAD) to prevent replay and out-of-order injection.
-- **Canvas-Only Visual Pipeline:** Decrypted photos are never injected into DOM `<img>` elements or `URL.createObjectURL()`. They decode directly via `createImageBitmap()` into an HTML5 `<canvas>` strictly while the user holds down the pointer.
-- **Immediate Memory Zeroing:** Media buffers, chunk slices, and session keys are wiped in RAM via `sodium.memzero()` immediately after transmission, viewing, or session termination.
-- **EXIF Stripping:** All outgoing photos are re-encoded through an offscreen canvas (WebP, max 1440px) to strip GPS and camera metadata before chunking.
-- **Anti-Leak Defense:** Window blur, tab switch (`visibilitychange`), or screenshot shortcut triggers an immediate blanking of the canvas and volatile memory wipe.
+Most private messaging apps still rely on a central server in the middle. Even when messages are end-to-end encrypted, a server usually handles the handshake, logs metadata (who connected and when), or temporarily stores encrypted media until the other person comes online. On the client side, normal web apps also leave traces behind in browser cache, cookies, or local storage.
 
----
+I wanted a lightweight personal tool, similar in spirit to Snapchat, for sharing quick photos and short chats with a few trusted people where:
 
-## 🛠️ Tech Stack
+- No third-party server ever touches the messages, photos, or connection tokens.
+- Nobody can open a session unless both people have the agreed passkey and manually approve the pairing.
+- Nothing is cached or written to disk on either device.
+- Photos can only be viewed while holding down on the screen, and get wiped from memory the moment you let go.
 
-- **Framework:** Vite + React 19 + TypeScript (strict mode) + Tailwind CSS v4
-- **Cryptography:** `libsodium-wrappers-sumo` (WASM)
-- **Transport:** Native browser WebRTC `RTCDataChannel` (ordered binary frames)
-- **Testing:** Vitest + jsdom + Puppeteer dual-tab E2E runner
-- **Hosting:** Cloudflare Pages (with strict `_headers`)
+## How It Works
 
----
+Instead of running a backend server to introduce two users, GhostTunnel runs completely as a static webpage and connects both browsers directly over WebRTC.
 
-## 🚀 Quick Start
+```text
+Host (Passkey + Invite Token) ---> Out-of-band (WhatsApp / QR) ---> Guest (Passkey + Response Token)
+Host <--- Out-of-band (Response Token / QR) <--- Guest
+Host <======== Direct Encrypted Peer-to-Peer Tunnel (RAM Only) ========> Guest
+```
 
-### 1. Install Dependencies
+1. **Agree on a Shared Passkey:** Both people decide on a short secret passkey beforehand.
+2. **Mutual Key Handshake:** The Host generates an encrypted Invite Token (GT1...) or QR code and sends it to the Guest. The Guest decrypts it using the passkey, approves it, and sends back an encrypted Response Token. Because the tokens are encrypted with the passkey, whatever chat app you use to copy-paste them cannot read what is inside.
+3. **Verify and Connect:** Once the Host accepts the Response Token, both browsers open a direct peer-to-peer connection and show the same 6-digit Safety Number so both sides know nobody tampered with the exchange.
+4. **View and Burn:** Text messages disappear automatically after a short timer. Photos require pressing and holding on the screen to view. Lifting your finger, running out of time, switching tabs, or closing the browser immediately wipes the image from RAM and sends a burn confirmation back to the sender.
+
+## Key Engineering Decisions
+
+I kept the system small and strict so it is easy to audit:
+
+- **Zero Disk Persistence:** The app never uses localStorage, sessionStorage, IndexedDB, cookies, or Service Workers. Every message, photo buffer, and encryption key lives only in JavaScript memory (RAM) and disappears when the tab closes.
+- **Double-Layer Encryption:** WebRTC encrypts traffic natively with DTLS. On top of that, GhostTunnel derives fresh per-session X25519 keys and encrypts every chat message and photo chunk with XChaCha20-Poly1305 (via libsodium) before it hits the network. Each packet also checks a strict sequence number to stop replay or reordering attacks.
+- **EXIF and GPS Stripping:** Before a photo leaves the sender's device, it is redrawn onto an offscreen canvas and re-encoded. This strips out hidden camera details and GPS coordinates automatically.
+- **Canvas-Only Photo Viewing:** Incoming photos are never turned into `<img>` tags or downloadable `blob:` URLs. They are decoded into a temporary bitmap, painted onto an HTML5 `<canvas>` only while pressed, and zeroed out in memory (`sodium.memzero`) the instant viewing stops.
+- **Strict Anti-Cache Headers:** Deployed with `Cache-Control: no-store`, `Clear-Site-Data`, and a strict Content Security Policy (`public/_headers`) so browsers do not cache responses or leak requests to external domains.
+
+## Honest Limitations
+
+No web app is magic, and it helps to be clear about what this design cannot solve:
+
+- **Both people must be online together:** Because there is no server holding an inbox, both devices need the page open at the same time to pair and talk.
+- **The physical camera problem:** Browser guardrails stop casual saving, caching, and tab-switching, but no website can physically stop someone from pointing a second phone camera at their screen or using an OS-level screen recorder. GhostTunnel is built to stop third-party leaks and accidental device history, not an untrusted recipient.
+- **Strict 4G/5G mobile networks:** Direct peer-to-peer connections work smoothly on Wi-Fi and most mixed networks. However, if both phones are on strict symmetric mobile carrier NATs at the exact same time, direct hole-punching can get blocked. For that case, the Network menu lets you plug in your own self-hosted Coturn relay server (and because payloads are already encrypted inside the browser, the relay still only sees unreadable ciphertext).
+
+## Tech Stack
+
+- **Frontend:** React 19, TypeScript (strict mode), Vite, Tailwind CSS v4
+- **Cryptography:** libsodium-wrappers-sumo (Argon2id, X25519, XChaCha20-Poly1305, memzero)
+- **Transport:** Native WebRTC RTCDataChannel
+- **QR Pairing:** Offline qrcode canvas rendering and browser BarcodeDetector (with manual paste fallback)
+- **Testing & Hosting:** Vitest, automated dual-tab browser E2E check, Cloudflare Pages
+
+## Running Locally
+
+Requires Node.js 20+.
+
 ```bash
+# Install dependencies
 npm install
-```
 
-### 2. Local Development
-```bash
+# Start the local dev server
 npm run dev
-```
-Open `http://localhost:5173`.
 
-### 3. Run Protocol & Cryptography Tests
-```bash
-npx vitest run
-```
-Runs 16 unit tests across `tests/crypto.test.ts` and `tests/chunker.test.ts`.
-
-### 4. Run Automated Dual-Tab E2E Verification
-```bash
-# Requires local Chrome installed at default path
-node tests/e2e-test.mjs
-```
-Automates two browser tabs testing negative auth rejection, mutual handshake, safety number verification, 5s TTL text auto-burn, hold-to-view canvas rendering, panic session wipe, and 0-storage verification.
-
-### 5. Pre-Release Security Audit
-Run the automated audit script:
-```bash
-# 1. Check for forbidden storage APIs in src/
-Select-String -Path (Get-ChildItem -Path src -Recurse -File).FullName -Pattern "localStorage|sessionStorage|indexedDB|createObjectURL|document\.cookie|serviceWorker"
-
-# 2. Type check
-npx tsc --noEmit
-
-# 3. Unit tests
+# Run unit tests (cryptography and photo chunking)
 npx vitest run
 
-# 4. Production build (verifies no .map files emitted)
+# Build static production bundle (outputs to dist/ with zero source maps)
 npm run build
-Get-ChildItem -Path dist -Recurse -Filter "*.map"
 ```
 
----
+To test it by yourself, open `http://localhost:5173` in two separate browser tabs (one as Host, one as Guest) and pair them with the same passkey.
 
-## ☁️ Cloudflare Pages Deployment
+## Deploying on Cloudflare Pages
 
-### 1. Connect Repository
-1. Push this repository to a private GitHub or GitLab repository.
-2. In the [Cloudflare Dashboard](https://dash.cloudflare.com/), go to **Workers & Pages** -> **Create application** -> **Pages** -> **Connect to Git**.
-3. Select the repository and configure build settings:
-   - **Framework preset:** `Vite` (or `None`)
-   - **Build command:** `npm run build`
-   - **Build output directory:** `dist`
-4. Click **Save and Deploy**. Cloudflare automatically applies `dist/_headers` on every request.
+Because there is no backend, you can host your own private copy for free:
 
-### 2. Verify Live Headers
-Verify strict caching and CSP headers on your deployed domain:
-```bash
-curl -I https://your-project.pages.dev
-```
-Expected response headers:
-```http
-Cache-Control: no-store, no-cache, must-revalidate, max-age=0
-Pragma: no-cache
-Clear-Site-Data: "cache", "storage"
-Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' data:;
-X-Content-Type-Options: nosniff
-X-Frame-Options: DENY
-Referrer-Policy: no-referrer
-```
+1. Connect this repository in Cloudflare Dashboard -> Workers & Pages -> Pages -> Connect to Git.
+2. Set build command to `npm run build` and output directory to `dist`.
+3. Add an environment variable `NODE_VERSION` set to `22` (or `20`).
+4. Deploy. Cloudflare automatically enforces `public/_headers` on every request.
 
-### 3. Local Emulator Test with Wrangler
-Test the built `dist/` bundle with real Cloudflare Pages header enforcement locally:
-```bash
-npx wrangler pages dev dist
-```
-Navigate to `http://localhost:8788`, verify zero CSP violations in DevTools Console, and confirm token creation works.
+**Optional Invite-Only Lock:** If you do not want strangers to even load the webpage, put your Pages URL behind Cloudflare Zero Trust -> Access with an Email One-Time PIN policy listing only your own email and your friends' emails.
 
----
+## Deep-Dive Documentation
 
-## 🛡️ Cloudflare Zero Trust (Email OTP Access Gate)
+If you want the exact binary packet layouts, threat model, and architecture notes, they are kept separately under `docs/`:
 
-To ensure GhostTunnel remains invite-only without modifying application code:
-
-1. In the Cloudflare Zero Trust dashboard, navigate to **Access** -> **Applications**.
-2. Click **Add an application** -> **Self-hosted**.
-3. Set the application name (e.g., `GhostTunnel`) and enter your Pages domain (`your-project.pages.dev`).
-4. Under **Policies**, create an **Allow** rule:
-   - **Action:** Allow
-   - **Include Rule:** Emails / Email domain (enter the authorized email addresses of yourself and your trusted invitees).
-5. Under **Identity providers**, enable **One-time PIN (OTP)**.
-6. Save the application. Anyone visiting the site must now enter a one-time passcode sent to an authorized email before the static assets load.
-
----
-
-## 🌐 Custom Coturn Setup (Optional TURN Relay)
-
-If peers are both behind restrictive cellular symmetric NATs (e.g., 4G/5G mobile carriers) where direct STUN P2P fails:
-
-1. Deploy Coturn on a cheap VPS using Docker:
-```bash
-docker run -d --net=host \
-  --name=coturn \
-  coturn/coturn \
-  -n \
-  --log-file=stdout \
-  --realm=turn.yourdomain.com \
-  --listening-port=3478 \
-  --tls-listening-port=5349 \
-  --user=tunneluser:SecretTurnPassword123 \
-  --no-stdout-log
-```
-2. Open the **NETWORK** drawer in the GhostTunnel app.
-3. Switch connection profile to **CUSTOM TURN**, enter:
-   - **URL:** `turn:turn.yourdomain.com:3478`
-   - **Username:** `tunneluser`
-   - **Credential:** `SecretTurnPassword123`
-4. Generate the invite token. The TURN configuration will be included in the token negotiation.
+- [Product Requirements (PRD)](docs/PRD.md)
+- [Technical R&D & Protocol Spec](docs/TECHNICAL_RD.md)
+- [Architecture Decision Records](docs/DECISIONS.md)
+- [Security & Zero-Persistence Policies](docs/POLICIES.md)

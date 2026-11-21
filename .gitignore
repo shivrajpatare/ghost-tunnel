@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Production builds
+dist/
+
+# Wrangler cache
+.wrangler/
+
+# Test media and logs
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.log
+!docs/*.png
+!docs/*.webp
+
+# Secrets & Environment
+.env
+.env.*
+*.local
+
+# System and editor files
+.DS_Store
+Thumbs.db
